@@ -1,0 +1,78 @@
+name: Publish privacy policy
+on:
+  push:
+    branches: [main]
+    paths: ['index.html', '.nojekyll', '.github/workflows/pages.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: privacy-pages
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate public policy and stage only approved files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          class Policy(HTMLParser):
+              def handle_starttag(self, tag, pairs):
+                  a=dict(pairs)
+                  assert tag not in ('script','iframe','form','img'), 'Unexpected active/remote content'
+                  assert not any(k.startswith('on') for k in a), 'Event handler'
+                  if tag=='html': assert a.get('lang')=='ko'
+                  if tag=='a':
+                      assert a.get('href','').startswith(('#','mailto:cozyhill@jlancer.net','https://docs.github.com/')), 'Unexpected link'
+          text=Path('index.html').read_text()
+          Policy().feed(text)
+          for required in ['참새방앗간','제이랜서(J Lancer)','cozyhill@jlancer.net','JSON','localStorage','allowBackup','GitHub Pages','데이터 삭제']:
+              assert required in text, required
+          assert 'BEGIN PRIVATE KEY' not in text
+          out=Path('_site');out.mkdir(exist_ok=True)
+          (out/'index.html').write_text(text)
+          (out/'privacy.html').write_text(text)
+          (out/'.nojekyll').touch()
+          assert sorted(p.name for p in out.iterdir())==['.nojekyll','index.html','privacy.html']
+          print('Validated static Korean policy; only index.html, privacy.html and .nojekyll staged.')
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy public policy
+        id: deployment
+        uses: actions/deploy-pages@v4
+  verify:
+    needs: deploy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify public HTTPS page bytes and identity
+        env:
+          POLICY_URL: ${{ needs.deploy.outputs.page_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${POLICY_URL#https://}" != "$POLICY_URL"
+          curl --fail --location --retry 8 --retry-all-errors --retry-delay 5 --max-time 30 "$POLICY_URL" -o /tmp/policy-live.html
+          cmp index.html /tmp/policy-live.html
+          sha256sum index.html /tmp/policy-live.html
+          printf 'Public policy verified: %s\\n' "$POLICY_URL"
